@@ -13,7 +13,7 @@ API_TOKEN = "YOUR_TOKEN"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- Состояния ---
+# ================= STATES =================
 class CreateReminder(StatesGroup):
     text = State()
     time = State()
@@ -22,7 +22,13 @@ class CreateReminder(StatesGroup):
     notify_before = State()
     timezone = State()
 
-# --- БД ---
+class EditReminder(StatesGroup):
+    text = State()
+    time = State()
+    days = State()
+    date = State()
+
+# ================= DB =================
 async def init_db():
     async with aiosqlite.connect("db.db") as db:
         await db.execute("""
@@ -39,26 +45,53 @@ async def init_db():
         """)
         await db.commit()
 
-# --- Кнопки дней ---
+# ================= UI =================
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ Создать", callback_data="create"),
+            InlineKeyboardButton(text="📋 Мои", callback_data="list")
+        ]
+    ])
+
 def days_keyboard(selected=[]):
-    days = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+    names = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
     kb = []
-    for i, d in enumerate(days, start=1):
+    row = []
+    for i, d in enumerate(names, 1):
         text = f"✅ {d}" if str(i) in selected else d
-        kb.append([InlineKeyboardButton(text=text, callback_data=f"day_{i}")])
+        row.append(InlineKeyboardButton(text=text, callback_data=f"day_{i}"))
+        if len(row) == 3:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+
     kb.append([InlineKeyboardButton(text="Готово", callback_data="done_days")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Старт ---
+def reminder_card(r):
+    id, _, text, time, days, date, before, tz = r
+
+    days_text = days if days else "—"
+    date_text = date if date else "—"
+
+    return f"""
+📌 <b>{text}</b>
+🆔 ID: {id}
+⏰ {time}
+📅 Дни: {days_text}
+📆 Дата: {date_text}
+⏳ За: {before} мин
+🌍 {tz}
+"""
+
+# ================= START =================
 @dp.message(Command("start"))
 async def start(msg: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать", callback_data="create")],
-        [InlineKeyboardButton(text="📋 Мои напоминания", callback_data="list")]
-    ])
-    await msg.answer("Выбери действие:", reply_markup=kb)
+    await msg.answer("🚀 <b>Менеджер напоминаний</b>", reply_markup=main_menu(), parse_mode="HTML")
 
-# --- Создание ---
+# ================= CREATE =================
 @dp.callback_query(F.data == "create")
 async def create(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("Введите текст:")
@@ -73,15 +106,14 @@ async def set_text(msg: types.Message, state: FSMContext):
 @dp.message(CreateReminder.time)
 async def set_time(msg: types.Message, state: FSMContext):
     await state.update_data(time=msg.text)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Разовое", callback_data="one_time")],
-        [InlineKeyboardButton(text="🔁 Повторяющееся", callback_data="repeat")]
-    ])
-    
-    await msg.answer("Тип события:", reply_markup=kb)
 
-# --- Тип ---
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Разовое", callback_data="one")],
+        [InlineKeyboardButton(text="🔁 Повтор", callback_data="repeat")]
+    ])
+    await msg.answer("Тип:", reply_markup=kb)
+
+# --- repeat ---
 @dp.callback_query(F.data == "repeat")
 async def repeat(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(days=[])
@@ -89,49 +121,46 @@ async def repeat(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(CreateReminder.days)
 
 @dp.callback_query(F.data.startswith("day_"))
-async def toggle_day(call: types.CallbackQuery, state: FSMContext):
+async def pick_day(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     days = data.get("days", [])
-    
-    day = call.data.split("_")[1]
-    
-    if day in days:
-        days.remove(day)
+
+    d = call.data.split("_")[1]
+    if d in days:
+        days.remove(d)
     else:
-        days.append(day)
-    
+        days.append(d)
+
     await state.update_data(days=days)
     await call.message.edit_reply_markup(reply_markup=days_keyboard(days))
 
 @dp.callback_query(F.data == "done_days")
 async def done_days(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("За сколько минут напомнить заранее?")
+    await call.message.answer("За сколько минут напомнить?")
     await state.set_state(CreateReminder.notify_before)
 
-# --- Разовое ---
-@dp.callback_query(F.data == "one_time")
-async def one_time(call: types.CallbackQuery, state: FSMContext):
+# --- one time ---
+@dp.callback_query(F.data == "one")
+async def one(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("Введите дату (YYYY-MM-DD):")
     await state.set_state(CreateReminder.date)
 
 @dp.message(CreateReminder.date)
 async def set_date(msg: types.Message, state: FSMContext):
     await state.update_data(date=msg.text)
-    await msg.answer("За сколько минут напомнить заранее?")
+    await msg.answer("За сколько минут напомнить?")
     await state.set_state(CreateReminder.notify_before)
 
-# --- Напоминание заранее ---
+# --- notify + tz ---
 @dp.message(CreateReminder.notify_before)
-async def notify_before(msg: types.Message, state: FSMContext):
+async def set_before(msg: types.Message, state: FSMContext):
     await state.update_data(notify_before=int(msg.text))
-    await msg.answer("Введите часовой пояс (например Europe/Berlin):")
+    await msg.answer("Часовой пояс (например Europe/Berlin):")
     await state.set_state(CreateReminder.timezone)
 
-# --- Таймзона и сохранение ---
 @dp.message(CreateReminder.timezone)
 async def save(msg: types.Message, state: FSMContext):
     data = await state.get_data()
-    data["timezone"] = msg.text
 
     async with aiosqlite.connect("db.db") as db:
         await db.execute("""
@@ -148,46 +177,69 @@ async def save(msg: types.Message, state: FSMContext):
         ))
         await db.commit()
 
-    await msg.answer("✅ Сохранено!")
+    await msg.answer("✅ Сохранено!", reply_markup=main_menu())
     await state.clear()
 
-# --- Список ---
+# ================= LIST =================
 @dp.callback_query(F.data == "list")
 async def list_reminders(call: types.CallbackQuery):
     async with aiosqlite.connect("db.db") as db:
-        async with db.execute("SELECT id, text FROM reminders WHERE user_id=?", (call.from_user.id,)) as cur:
+        async with db.execute("SELECT * FROM reminders WHERE user_id=?", (call.from_user.id,)) as cur:
             rows = await cur.fetchall()
 
-    kb = []
     for r in rows:
-        kb.append([
-            InlineKeyboardButton(text=r[1], callback_data=f"view_{r[0]}")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️", callback_data=f"edit_{r[0]}"),
+                InlineKeyboardButton(text="❌", callback_data=f"del_{r[0]}")
+            ]
         ])
+        await call.message.answer(reminder_card(r), parse_mode="HTML", reply_markup=kb)
 
-    await call.message.answer("Твои напоминания:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-# --- Удаление ---
-@dp.callback_query(F.data.startswith("view_"))
-async def view(call: types.CallbackQuery):
-    rid = call.data.split("_")[1]
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{rid}")]
-    ])
-    
-    await call.message.answer(f"Напоминание ID {rid}", reply_markup=kb)
-
+# ================= DELETE =================
 @dp.callback_query(F.data.startswith("del_"))
 async def delete(call: types.CallbackQuery):
     rid = call.data.split("_")[1]
-    
+
     async with aiosqlite.connect("db.db") as db:
         await db.execute("DELETE FROM reminders WHERE id=?", (rid,))
         await db.commit()
-    
-    await call.message.answer("Удалено!")
 
-# --- Планировщик ---
+    await call.message.answer("❌ Удалено")
+
+# ================= EDIT =================
+@dp.callback_query(F.data.startswith("edit_"))
+async def edit_menu(call: types.CallbackQuery, state: FSMContext):
+    rid = call.data.split("_")[1]
+    await state.update_data(edit_id=rid)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Текст", callback_data="et")],
+        [InlineKeyboardButton(text="Время", callback_data="etm")],
+        [InlineKeyboardButton(text="Дни", callback_data="ed")],
+        [InlineKeyboardButton(text="Дата", callback_data="eda")]
+    ])
+    await call.message.answer("Что изменить?", reply_markup=kb)
+
+@dp.callback_query(F.data == "et")
+async def edit_text(call: types.CallbackQuery, state: FSMContext):
+    await call.message.answer("Новый текст:")
+    await state.set_state(EditReminder.text)
+
+@dp.message(EditReminder.text)
+async def save_text(msg: types.Message, state: FSMContext):
+    rid = (await state.get_data())["edit_id"]
+
+    async with aiosqlite.connect("db.db") as db:
+        await db.execute("UPDATE reminders SET text=? WHERE id=?", (msg.text, rid))
+        await db.commit()
+
+    await msg.answer("✅ Обновлено")
+    await state.clear()
+
+# Аналогично можно расширить остальные поля (время, дни, дата)
+
+# ================= SCHEDULER =================
 async def scheduler():
     while True:
         now = datetime.utcnow()
@@ -204,16 +256,13 @@ async def scheduler():
                 local_now = now.astimezone(tz_obj)
 
                 reminder_time = datetime.strptime(time_str, "%H:%M").time()
-
                 target_time = datetime.combine(local_now.date(), reminder_time) - timedelta(minutes=before)
 
-                # Разовое
                 if date:
-                    target_date = datetime.strptime(date, "%Y-%m-%d").date()
-                    if local_now.date() == target_date and abs((local_now - target_time).seconds) < 60:
-                        await bot.send_message(user_id, f"⏰ {text}")
+                    if local_now.strftime("%Y-%m-%d") == date:
+                        if abs((local_now - target_time).seconds) < 60:
+                            await bot.send_message(user_id, f"⏰ {text}")
 
-                # Повторяющееся
                 elif days:
                     if str(local_now.isoweekday()) in days.split(","):
                         if abs((local_now - target_time).seconds) < 60:
@@ -224,7 +273,7 @@ async def scheduler():
 
         await asyncio.sleep(60)
 
-# --- Запуск ---
+# ================= RUN =================
 async def main():
     await init_db()
     asyncio.create_task(scheduler())
