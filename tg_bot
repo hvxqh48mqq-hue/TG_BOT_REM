@@ -1,8 +1,3 @@
-FROM python:3.9
-WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir -r requirements.txt
-CMD ["python", "tg_bot"]
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
